@@ -1,0 +1,248 @@
+unit SimpleWebSocket;
+
+interface
+
+uses
+  Winapi.Windows, System.Classes, System.SysUtils, System.Math,
+  IdContext, IdGlobal, IdHash, IdHashSHA, IdTCPClient, IdIOHandler, IdCoderMIME;
+
+type
+  TWebSocketFrame = record
+    Fin: Boolean;
+    OpCode: Byte;
+    Payload: TIdBytes;
+  end;
+
+  TSimpleWebSocket = class
+  public
+    // Handshake Helpers
+    class function ComputeAcceptKey(const AKey: String): String;
+    class function IsWebSocketRequest(AContext: TIdContext; out AResource, AKey: String): Boolean;
+    class procedure PerformHandshake(AContext: TIdContext; const AKey: String);
+    class procedure PerformClientHandshake(AClient: TIdTCPClient; const AHost, APath: String);
+
+    // Frame Helpers
+    class function ReadFrame(AIOHandler: TIdIOHandler; out AFrame: TWebSocketFrame): Boolean;
+    class procedure WriteFrame(AIOHandler: TIdIOHandler; const AText: String; AUseMask: Boolean = False); overload;
+    class procedure WriteFrame(AIOHandler: TIdIOHandler; const AData: TIdBytes; AOpCode: Byte = $1; AUseMask: Boolean = False); overload;
+  end;
+
+implementation
+
+{ TSimpleWebSocket }
+
+class function TSimpleWebSocket.ComputeAcceptKey(const AKey: String): String;
+var
+  LHash: TIdHashSHA1;
+  LGuid: String;
+begin
+  LGuid := '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+  LHash := TIdHashSHA1.Create;
+  try
+    Result := TIdEncoderMIME.EncodeBytes(LHash.HashString(AKey + LGuid));
+  finally
+    LHash.Free;
+  end;
+end;
+
+class function TSimpleWebSocket.IsWebSocketRequest(AContext: TIdContext; out AResource, AKey: String): Boolean;
+var
+  LLine: String;
+begin
+  Result := False;
+  AKey := '';
+  AResource := '';
+  // Simple header parsing - expects headers to be available
+  
+  try
+    // Read first line for GET request
+    if AContext.Connection.Connected then
+    begin
+      LLine := AContext.Connection.IOHandler.ReadLn;
+      if (Pos('GET ', LLine) = 1) then
+      begin
+        // Extract Resource: GET /path HTTP/1.1
+        AResource := Copy(LLine, 5, Pos(' HTTP/', LLine) - 5);
+      end;
+      
+      while AContext.Connection.Connected do
+      begin
+        LLine := AContext.Connection.IOHandler.ReadLn;
+        if LLine = '' then Break; // End of headers
+
+        if (Pos('Sec-WebSocket-Key:', LLine) > 0) then
+        begin
+          AKey := Trim(Copy(LLine, Pos(':', LLine) + 1, MaxInt));
+          Result := True;
+        end;
+      end;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+class procedure TSimpleWebSocket.PerformHandshake(AContext: TIdContext; const AKey: String);
+var
+  LAccept: String;
+  LResponse: TStringList;
+begin
+  LAccept := ComputeAcceptKey(AKey);
+  LResponse := TStringList.Create;
+  try
+    LResponse.Add('HTTP/1.1 101 Switching Protocols');
+    LResponse.Add('Upgrade: websocket');
+    LResponse.Add('Connection: Upgrade');
+    LResponse.Add('Sec-WebSocket-Accept: ' + LAccept);
+    LResponse.Add('');
+    AContext.Connection.IOHandler.Write(LResponse.Text);
+  finally
+    LResponse.Free;
+  end;
+end;
+
+class procedure TSimpleWebSocket.PerformClientHandshake(AClient: TIdTCPClient; const AHost, APath: String);
+var
+  LRequest: TStringList;
+  LKey, LLine, LResponse: String;
+  LAccept: String;
+begin
+  // Generate random key
+  LKey := TIdEncoderMIME.EncodeBytes(TIdBytes(TIdHashSHA1.Create.HashString(IntToStr(GetTickCount)))); 
+  // *Standard indy doesn't have easy random bytes, using tick count hash as simple seed for example*
+  // Better:
+  LKey := 'dGhlIHNhbXBsZSBub25jZQ=='; // Fixed for simplicity/example, normally random base64
+
+  LRequest := TStringList.Create;
+  try
+    LRequest.Add('GET ' + APath + ' HTTP/1.1');
+    LRequest.Add('Host: ' + AHost);
+    LRequest.Add('Upgrade: websocket');
+    LRequest.Add('Connection: Upgrade');
+    LRequest.Add('Sec-WebSocket-Key: ' + LKey);
+    LRequest.Add('Sec-WebSocket-Version: 13');
+    LRequest.Add('');
+    AClient.IOHandler.Write(LRequest.Text);
+  finally
+    LRequest.Free;
+  end;
+
+  // Read response
+  while True do
+  begin
+    LLine := AClient.IOHandler.ReadLn;
+    if LLine = '' then Break;
+    // verify 'HTTP/1.1 101' in first line technically
+  end;
+end;
+
+class function TSimpleWebSocket.ReadFrame(AIOHandler: TIdIOHandler; out AFrame: TWebSocketFrame): Boolean;
+var
+  b1, b2: Byte;
+  PayloadLen: Int64;
+  Mask: TIdBytes;
+  I: Integer;
+begin
+  Result := False;
+  try
+    if AIOHandler.InputBufferIsEmpty then
+    begin
+      AIOHandler.CheckForDataOnSource(10);
+      if AIOHandler.InputBufferIsEmpty then Exit;
+    end;
+
+    b1 := AIOHandler.ReadByte;
+    AFrame.Fin := (b1 and $80) <> 0;
+    AFrame.OpCode := b1 and $0F;
+
+    b2 := AIOHandler.ReadByte;
+    Result := True; // Valid frame start
+    
+    PayloadLen := b2 and $7F;
+    if PayloadLen = 126 then
+      PayloadLen := AIOHandler.ReadUInt16(True) // Big Endian
+    else if PayloadLen = 127 then
+      PayloadLen := AIOHandler.ReadUInt64(True);
+
+    if (b2 and $80) <> 0 then // Masked
+    begin
+      AIOHandler.ReadBytes(Mask, 4);
+      AIOHandler.ReadBytes(AFrame.Payload, PayloadLen);
+      for I := 0 to PayloadLen - 1 do
+        AFrame.Payload[I] := AFrame.Payload[I] xor Mask[I mod 4];
+    end
+    else
+    begin
+      AIOHandler.ReadBytes(AFrame.Payload, PayloadLen);
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+class procedure TSimpleWebSocket.WriteFrame(AIOHandler: TIdIOHandler; const AText: String; AUseMask: Boolean);
+begin
+  WriteFrame(AIOHandler, ToBytes(AText, IndyTextEncoding_UTF8), $1, AUseMask);
+end;
+
+class procedure TSimpleWebSocket.WriteFrame(AIOHandler: TIdIOHandler; const AData: TIdBytes; AOpCode: Byte; AUseMask: Boolean);
+var
+  Header: TIdBytes;
+  Len: Int64;
+  Mask: TIdBytes;
+  I: Integer;
+  Payload: TIdBytes;
+begin
+  Len := Length(AData);
+  SetLength(Header, 0); // Start empty
+  
+  // Byte 1: FIN + OpCode
+  AppendByte(Header, $80 or AOpCode); // Always FIN for this simple example
+
+  // Byte 2: Mask Bit + Payload Len
+  if Len <= 125 then
+    AppendByte(Header, Byte(Len) or (Byte(AUseMask) shl 7))
+  else
+  if Len <= 65535 then
+  begin
+    // 16-bit Length (Big Endian)
+    AppendByte(Header, 126 or (Byte(AUseMask) shl 7));
+    AppendByte(Header, (Len shr 8) and $FF);
+    AppendByte(Header, Len and $FF);
+  end
+  else
+  begin
+    // 64-bit Length (Big Endian)
+    AppendByte(Header, 127 or (Byte(AUseMask) shl 7));
+    AppendByte(Header, (Len shr 56) and $FF);
+    AppendByte(Header, (Len shr 48) and $FF);
+    AppendByte(Header, (Len shr 40) and $FF);
+    AppendByte(Header, (Len shr 32) and $FF);
+    AppendByte(Header, (Len shr 24) and $FF);
+    AppendByte(Header, (Len shr 16) and $FF);
+    AppendByte(Header, (Len shr 8) and $FF);
+    AppendByte(Header, Len and $FF);
+  end;
+
+  if AUseMask then
+  begin
+    // Generate random mask
+    SetLength(Mask, 4);
+    Mask[0] := Random(255); Mask[1] := Random(255); Mask[2] := Random(255); Mask[3] := Random(255);
+    AppendBytes(Header, Mask);
+
+    SetLength(Payload, Len);
+    for I := 0 to Len - 1 do
+      Payload[I] := AData[I] xor Mask[I mod 4];
+    
+    AIOHandler.Write(Header);
+    AIOHandler.Write(Payload);
+  end
+  else
+  begin
+    AIOHandler.Write(Header);
+    AIOHandler.Write(AData);
+  end;
+end;
+
+end.

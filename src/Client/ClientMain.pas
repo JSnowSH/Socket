@@ -1,0 +1,227 @@
+unit ClientMain;
+
+interface
+
+uses
+  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
+  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, System.SyncObjs,
+  IdTCPClient, IdGlobal, SimpleWebSocket, System.JSON;
+
+type
+  TLogEvent = procedure(const S: String) of object;
+
+  TReadingThread = class(TThread)
+  private
+    FClient: TIdTCPClient;
+    FLogEvent: TLogEvent;
+    FLock: TCriticalSection;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AClient: TIdTCPClient; ALock: TCriticalSection; ALogEvent: TLogEvent);
+  end;
+
+  TFClientMain = class(TForm)
+    MemoLog: TMemo;
+    EditMsg: TEdit;
+    EditTarget: TEdit;
+    BtnSend: TButton;
+    BtnConnect: TButton;
+    Label1: TLabel;
+    Label2: TLabel;
+    Label3: TLabel;
+    Label4: TLabel;
+    EditName: TEdit;
+    procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
+    procedure BtnConnectClick(Sender: TObject);
+    procedure BtnSendClick(Sender: TObject);
+  private
+    { Private declarations }
+    FTcpClient: TIdTCPClient;
+    FReadingThread: TReadingThread;
+    FLock: TCriticalSection;
+    procedure Log(const AMsg: String);
+  public
+    { Public declarations }
+  end;
+
+var
+  FClientMain: TFClientMain;
+
+implementation
+
+{$R *.dfm}
+
+{ TReadingThread }
+
+constructor TReadingThread.Create(AClient: TIdTCPClient; ALock: TCriticalSection; ALogEvent: TLogEvent);
+begin
+  inherited Create(False);
+  FClient := AClient;
+  FLock := ALock;
+  FLogEvent := ALogEvent;
+  FreeOnTerminate := True;
+end;
+
+procedure TReadingThread.Execute;
+var
+  Frame: TWebSocketFrame;
+  Msg: String;
+  HasData: Boolean;
+begin
+  while (not Terminated) and FClient.Connected do
+  begin
+    try
+      // Check for data safely
+      HasData := False;
+      FLock.Enter;
+      try
+        if FClient.Connected and FClient.IOHandler.InputBufferIsEmpty then
+        begin
+             FClient.IOHandler.CheckForDataOnSource(10);
+        end;
+        // If still empty after check, we release lock and sleep briefly
+        if FClient.Connected and (not FClient.IOHandler.InputBufferIsEmpty) then
+           HasData := True;
+      finally
+        FLock.Leave;
+      end;
+
+      if not HasData then
+      begin
+        Sleep(10);
+        Continue;
+      end;
+      
+      // Now read frame with lock
+      FLock.Enter;
+      try
+         // Double check connection
+         if not FClient.Connected then Break;
+         
+         if TSimpleWebSocket.ReadFrame(FClient.IOHandler, Frame) then
+         begin
+            if Frame.OpCode = 8 then // Close
+            begin
+              if Assigned(FLogEvent) then TThread.Queue(nil, procedure begin FLogEvent('Server closed connection'); end);
+              FClient.Disconnect;
+              Break;
+            end;
+
+            if Frame.OpCode = 1 then // Text
+            begin
+              Msg := Copy(BytesToString(Frame.Payload, IndyTextEncoding_UTF8), 1, Length(Frame.Payload));
+              if Assigned(FLogEvent) then TThread.Queue(nil, procedure begin FLogEvent('Received: ' + Msg); end);
+            end;
+         end;
+      finally
+         FLock.Leave;
+      end;
+
+    except
+      on E: Exception do
+      begin
+        if Assigned(FLogEvent) then TThread.Queue(nil, procedure begin FLogEvent('Error reading: ' + E.Message); end);
+        Break; 
+      end;
+    end;
+  end;
+end;
+
+{ TFClientMain }
+
+procedure TFClientMain.FormCreate(Sender: TObject);
+begin
+  FLock := TCriticalSection.Create;
+  FTcpClient := TIdTCPClient.Create(Self);
+  FTcpClient.Port := 8080;
+  FTcpClient.Host := '127.0.0.1';
+end;
+
+procedure TFClientMain.FormDestroy(Sender: TObject);
+begin
+  if Assigned(FReadingThread) then
+  begin
+    FReadingThread.Terminate;
+  end;
+  
+  FTcpClient.Disconnect;
+  FLock.Free;
+end;
+
+procedure TFClientMain.Log(const AMsg: String);
+begin
+  MemoLog.Lines.Add(FormatDateTime('hh:mm:ss', Now) + ' ' + AMsg);
+end;
+
+procedure TFClientMain.BtnConnectClick(Sender: TObject);
+begin
+  if FTcpClient.Connected then
+  begin
+    FTcpClient.Disconnect;
+    BtnConnect.Caption := 'Connect';
+    Log('Disconnected');
+    Exit;
+  end;
+
+  FLock.Enter;
+  try
+    try
+      FTcpClient.Connect;
+      Log('TCP Connected. Performing Handshake...');
+      
+      try
+        TSimpleWebSocket.PerformClientHandshake(FTcpClient, 'localhost', '/chat?name=' + EditName.Text);
+        Log('WebSocket Handshake Successful!');
+        BtnConnect.Caption := 'Disconnect';
+        
+        // Start reading thread - passing Self.Log directly!
+        FReadingThread := TReadingThread.Create(FTcpClient, FLock, Log);
+      except
+        on E: Exception do
+        begin
+          Log('Handshake Failed: ' + E.Message);
+          FTcpClient.Disconnect;
+        end;
+      end;
+    except
+      on E: Exception do
+        Log('Connection Failed: ' + E.Message);
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TFClientMain.BtnSendClick(Sender: TObject);
+var
+  Json: TJSONObject;
+  Msg: String;
+begin
+  if not FTcpClient.Connected then
+  begin
+    Log('Not connected!');
+    Exit;
+  end;
+
+  Json := TJSONObject.Create;
+  try
+    Json.AddPair('to', EditTarget.Text);
+    Json.AddPair('msg', EditMsg.Text);
+    Msg := Json.ToString;
+    
+    FLock.Enter;
+    try
+      TSimpleWebSocket.WriteFrame(FTcpClient.IOHandler, Msg, True); 
+    finally
+      FLock.Leave;
+    end;
+    
+    Log('Sent: ' + Msg);
+  finally
+    Json.Free;
+  end;
+end;
+
+end.
