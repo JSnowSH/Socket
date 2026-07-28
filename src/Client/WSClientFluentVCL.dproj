@@ -76,6 +76,7 @@
         <DCCReference Include="..\Lib\THR.WebSocket.Server.pas"/>
         <DCCReference Include="..\Lib\THR.WebSocket.Client.pas"/>
         <DCCReference Include="..\Lib\THR.WebSocket.pas"/>
+        <DCCReference Include="..\Lib\THR.WebSocket.Pusher.pas"/>
         <DCCReference Include="ClientFluentMain.pas">
             <Form>FrmClientFluent</Form>
             <FormType>dfm</FormType>

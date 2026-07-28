@@ -19,6 +19,7 @@ uses
   THR.WebSocket.Server in '..\Lib\THR.WebSocket.Server.pas',
   THR.WebSocket.Client in '..\Lib\THR.WebSocket.Client.pas',
   THR.WebSocket in '..\Lib\THR.WebSocket.pas',
+  THR.WebSocket.Pusher in '..\Lib\THR.WebSocket.Pusher.pas',
   ClientFluentMain in 'ClientFluentMain.pas' {FrmClientFluent};
 
 {$R *.res}
@@ -26,7 +27,7 @@ uses
 begin
   Application.Initialize;
   Application.MainFormOnTaskbar := True;
-  Application.Title := 'Cliente WebSocket fluente';
+  Application.Title := 'Cliente Pusher fluente';
   Application.CreateForm(TFrmClientFluent, FrmClientFluent);
   Application.Run;
 end.
