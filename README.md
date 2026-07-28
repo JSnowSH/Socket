@@ -155,6 +155,17 @@ O cliente mascara os quadros (exigência da RFC para o lado cliente), valida o
 depois do handshake. Ela cuida do recurso `/app/{app_key}`, do `socket_id`, do
 `pusher:ping`, da inscrição em canais e da assinatura de canais privados.
 
+O que ela fala é o **protocolo Pusher**, não um servidor específico. Vale para
+qualquer implementação compatível, e não só para o Reverb:
+
+- **Laravel Reverb** (Laravel 11+), o servidor oficial atual;
+- **beyondcode/laravel-websockets**, usado nas versões anteriores — funciona sem
+  nenhuma alteração no cliente, testado em projeto que ainda não migrou;
+- **Pusher hospedado** e outros servidores que implementem o mesmo protocolo,
+  desde que acessíveis sem TLS (veja as limitações no fim desta seção).
+
+Do lado do Delphi muda apenas host, porta e app key.
+
 ```delphi
 FPusher := TPusherClient
   .New
@@ -275,10 +286,11 @@ mensagens offline) usando somente a API fluente.
 | `WSClient` | VCL | chat próprio | Referência histórica: thread de leitura e seção crítica escritas à mão |
 | `WSClientFluent` | console | chat próprio | Testes rápidos e automatizados por linha de comando |
 | `WSChatVCL` | VCL | chat próprio | O mesmo chat com interface, já usando a API fluente |
-| `WSClientFluentVCL` | VCL | Pusher | Conectar a um Laravel Reverb: canais, eventos e autorização |
+| `WSClientFluentVCL` | VCL | Pusher | Conectar a um servidor Laravel: canais, eventos e autorização |
 
 Os três primeiros conversam com o `WSServerFluent` deste repositório; o último
-conversa com o servidor do Laravel e não usa o servidor daqui.
+conversa com o servidor WebSocket do Laravel — Reverb ou
+`beyondcode/laravel-websockets` — e não usa o servidor daqui.
 
 ### `src\Client\WSClient.dpr` — cliente VCL sem a biblioteca
 
@@ -346,8 +358,10 @@ um `OnAuthorize` que faz `POST` em JSON (`socket_id`, `channel_name`) com
 campo `auth` da resposta; vazia, deixa a biblioteca assinar com o app secret.
 O POST roda na thread principal — para muitos canais, mova-o para uma thread.
 
-Roteiro: `php artisan reverb:start`, preencha servidor e app key, **Conectar**,
-inscreva-se no canal e dispare um `broadcast(new SeuEvento)` no Laravel.
+Roteiro: suba o servidor (`php artisan reverb:start` ou, em projetos ainda com
+o `beyondcode/laravel-websockets`, `php artisan websockets:serve`), preencha
+servidor e app key, **Conectar**, inscreva-se no canal e dispare um
+`broadcast(new SeuEvento)` no Laravel. O formulário é o mesmo nos dois casos.
 
 ### `src\Client\WSClientFluent.dpr` — cliente em console
 
