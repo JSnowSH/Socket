@@ -17,6 +17,7 @@ Escrita conforme **ThR — Normas e Padronização de Codificação (Delphi) v4.
 | `THR.WebSocket.Message.pas` | Construtor fluente de mensagens de saída |
 | `THR.WebSocket.Server.pas` | Servidor (`TWebSocketServer.New`) |
 | `THR.WebSocket.Client.pas` | Cliente (`TWebSocketClient.New`), com thread de leitura própria |
+| `THR.WebSocket.Pusher.pas` | Cliente do protocolo Pusher / Laravel Reverb (`TPusherClient.New`), sobre o cliente acima |
 
 Dependências: apenas RTL + Indy (já presente no RAD Studio). Adicione `src\Lib`
 ao *search path* do projeto.
@@ -147,6 +148,104 @@ FClient.Disconnect;
 O cliente mascara os quadros (exigência da RFC para o lado cliente), valida o
 `Sec-WebSocket-Accept` do servidor e mantém uma thread de leitura própria.
 
+## Cliente Pusher (Laravel Reverb / Laravel WebSockets)
+
+`THR.WebSocket.Pusher` é uma camada de **protocolo de aplicação** sobre o
+`IWebSocketClient`: o transporte continua sendo o mesmo, o que muda é o diálogo
+depois do handshake. Ela cuida do recurso `/app/{app_key}`, do `socket_id`, do
+`pusher:ping`, da inscrição em canais e da assinatura de canais privados.
+
+```delphi
+FPusher := TPusherClient
+  .New
+  .Host('127.0.0.1')
+  .Port(6001)                     // PUSHER_PORT
+  .AppKey('5e0e16cc…')            // PUSHER_APP_KEY
+  .SynchronizeEvents
+  .OnConnected(
+    procedure(const AClient: IPusherClient)
+    begin
+      MemoLog.Lines.Add('socket_id: ' + AClient.SocketID);
+    end)
+  .OnEvent(
+    procedure(const AClient: IPusherClient; const AChannel: String;
+      const AEvent: String; const AData: String)
+    begin
+      MemoLog.Lines.Add(Format('[%s] %s %s', [AChannel, AEvent, AData]));
+    end)
+  .Subscribe('pedidos')
+  .Connect;
+```
+
+Guarde a variável em um campo: a interface é contada por referência e a conexão
+cai junto com ela. Canais registrados antes do `Connect` são subscritos sozinhos
+assim que o `socket_id` chega.
+
+### Configuração
+
+| Método | Padrão | Efeito |
+|---|---|---|
+| `Host` / `Port` | `127.0.0.1` / 6001 | Endereço do Reverb (`PUSHER_HOST` / `PUSHER_PORT`) |
+| `Path` | `/app` | Prefixo do recurso; a app key é concatenada |
+| `AppKey` | — | Obrigatória; identifica a aplicação no servidor |
+| `AppSecret` | vazio | Assina canais privados localmente (**apenas testes**) |
+| `ConnectTimeout` / `ReadTimeout` / `SynchronizeEvents` | — | Repassados ao cliente WebSocket |
+
+`PUSHER_APP_ID` e `PUSHER_APP_CLUSTER` não participam da conexão do cliente —
+servem à API HTTP de publicação e ao serviço hospedado da Pusher.
+
+### Eventos
+
+| Evento | Quando dispara |
+|---|---|
+| `OnConnected` | Após o `pusher:connection_established` (já com `socket_id`) |
+| `OnDisconnected` | Conexão encerrada |
+| `OnSubscribed` | `pusher_internal:subscription_succeeded` de um canal |
+| `OnEvent` | Qualquer outro evento: `(canal, evento, data)` |
+| `OnAuthorize` | Função que devolve o `auth` de um canal privado |
+| `OnError` / `OnLog` | Erros do protocolo e rastreamento |
+
+`IsConnected` indica o socket aberto; `IsEstablished` indica o handshake de
+aplicação concluído — é este que habilita `Subscribe` e `Trigger`.
+
+### Canais privados e de presença
+
+O Reverb não decide quem entra no canal: ele apenas confere uma assinatura
+HMAC-SHA256 de `"{socket_id}:{canal}"`. Há dois caminhos:
+
+```delphi
+// 1. assinatura local — rápido para testar, expõe o segredo no executável
+FPusher.AppSecret('b60900f4…');
+
+// 2. delegada ao Laravel — caminho correto em produção
+FPusher.OnAuthorize(
+  function(const ASocketID: String; const AChannel: String): String
+  begin
+    // POST em /broadcasting/auth com socket_id e channel_name;
+    // devolver o campo "auth" da resposta
+    Result := MinhaApi.Autorizar(ASocketID, AChannel);
+  end);
+```
+
+Só o segundo aplica as regras de `routes/channels.php`. Com o segredo local,
+qualquer canal é aceito. Canais de presença exigem também o `channel_data`
+devolvido pelo endpoint, informado em `Subscribe(canal, channelData)`.
+
+### Envio e manutenção da conexão
+
+```delphi
+FPusher.Trigger('private-sala.1', 'client-digitando', '{"user":"Ana"}');
+FPusher.Ping;   // pusher:ping — evite cair pelo activity_timeout
+```
+
+`Trigger` exige o prefixo `client-`, canal privado ou de presença e client
+events habilitados no servidor. `Socket` devolve o `IWebSocketClient` interno,
+caso precise do transporte cru.
+
+> Limitações atuais: sem `wss://` (TLS) — o transporte é TCP puro, adequado a
+> `PUSHER_SCHEME=http`; e o `IPusherClient` é somente cliente, o
+> `THR.WebSocket.Server` não substitui o Reverb.
+
 ## Protocolo do exemplo de chat
 
 Mensagem do cliente: `{"to": "ALL" | "<usuário>", "msg": "<texto>"}`.
@@ -169,11 +268,30 @@ formato de payload.
 Servidor de chat: reproduz o comportamento original (broadcast, envio direto e
 mensagens offline) usando somente a API fluente.
 
-### `src\Client\WSClientFluentVCL.dpr` — cliente com interface visual
+### Panorama dos clientes
 
-Equivalente ao `WSClient` original (mesmo layout: log, mensagem, destino, nome,
-botão de conexão), porém consumindo a biblioteca. O formulário
-[ClientFluentMain.pas](../Client/ClientFluentMain.pas) **não tem thread de
+| Projeto | Tipo | Protocolo | Serve para |
+|---|---|---|---|
+| `WSClient` | VCL | chat próprio | Referência histórica: thread de leitura e seção crítica escritas à mão |
+| `WSClientFluent` | console | chat próprio | Testes rápidos e automatizados por linha de comando |
+| `WSChatVCL` | VCL | chat próprio | O mesmo chat com interface, já usando a API fluente |
+| `WSClientFluentVCL` | VCL | Pusher | Conectar a um Laravel Reverb: canais, eventos e autorização |
+
+Os três primeiros conversam com o `WSServerFluent` deste repositório; o último
+conversa com o servidor do Laravel e não usa o servidor daqui.
+
+### `src\Client\WSClient.dpr` — cliente VCL sem a biblioteca
+
+Versão original, anterior à `THR.WebSocket`: fala WebSocket direto pela unit
+`src\Common\SimpleWebSocket.pas`, com thread de leitura e seção crítica dentro
+do próprio formulário. Mantido como comparação — mostra o que a biblioteca
+passou a absorver.
+
+### `src\Client\WSChatVCL.dpr` — chat com interface visual
+
+Mesmo layout do `WSClient` (log, mensagem, destino, nome, botão de conexão),
+porém consumindo a biblioteca. O formulário
+[ClientChatMain.pas](src/Client/ClientChatMain.pas) **não tem thread de
 leitura nem seção crítica** — `SynchronizeEvents` entrega os eventos na thread
 principal, então os controles são atualizados diretamente:
 
@@ -199,6 +317,37 @@ Recursos da tela: campo `host` ou `host:porta`, botão Conectar/Desconectar com
 estado refletido no rótulo colorido, botão Ping, `Enter` envia a mensagem e
 tradução do protocolo JSON para linhas legíveis. No `OnDestroy`, os eventos são
 anulados antes de liberar a interface, desfazendo a captura de `Self`.
+
+### `src\Client\WSClientFluentVCL.dpr` — cliente Pusher / Laravel Reverb
+
+Formulário [ClientFluentMain.pas](src/Client/ClientFluentMain.pas), o único
+exemplo que **não** usa o servidor deste repositório. A tela expõe todo o ciclo
+do protocolo:
+
+| Campo / botão | Papel |
+|---|---|
+| **Servidor** | `host` ou `host:porta` (padrão `127.0.0.1:6001`) |
+| **App key** | `PUSHER_APP_KEY`; vira o recurso `/app/{key}` |
+| **App secret** | Assinatura local de canais privados; deixe vazio em produção |
+| **Auth URL** | `/broadcasting/auth`; preenchida, tem prioridade sobre o secret |
+| **Token** | `Authorization: Bearer …` enviado ao endpoint de autorização |
+| **Conectar** / **Ping** | Abre a conexão; `Ping` dispara `pusher:ping` |
+| **Canal** + **Inscrever** / **Cancelar** | `pusher:subscribe` e `pusher:unsubscribe` |
+| **Evento** + **Payload** + **Enviar** | Dispara um evento `client-*` no canal |
+
+O rótulo de status distingue três estados: `Desconectado`, `Negociando…`
+(socket aberto, aguardando o `connection_established`) e `Conectado` (com
+`socket_id`). O log registra o handshake, cada inscrição, o POST de autorização
+e todo evento recebido no formato `< [canal] evento {json}`.
+
+A autorização fica em `BindAuthorization`: com **Auth URL** preenchida, instala
+um `OnAuthorize` que faz `POST` em JSON (`socket_id`, `channel_name`) com
+`Accept: application/json` e `X-Requested-With: XMLHttpRequest`, e extrai o
+campo `auth` da resposta; vazia, deixa a biblioteca assinar com o app secret.
+O POST roda na thread principal — para muitos canais, mova-o para uma thread.
+
+Roteiro: `php artisan reverb:start`, preencha servidor e app key, **Conectar**,
+inscreva-se no canal e dispare um `broadcast(new SeuEvento)` no Laravel.
 
 ### `src\Client\WSClientFluent.dpr` — cliente em console
 
@@ -231,8 +380,8 @@ servidor guarda a mensagem e a entrega no próximo handshake dele.
 ### Roteiro de teste
 
 1. `WSServerFluent.exe`
-2. `WSClientFluentVCL.exe` — nome `UserA`, Conectar
-3. `WSClientFluentVCL.exe` (segunda instância) — nome `UserB`, Conectar
+2. `WSChatVCL.exe` — nome `UserA`, Conectar
+3. `WSChatVCL.exe` (segunda instância) — nome `UserB`, Conectar
 4. Em `UserA`: destino `UserB`, mensagem qualquer, Enviar
 
 `UserB` recebe `< [UserB] …`. Com destino `ALL`, todos recebem exceto o
