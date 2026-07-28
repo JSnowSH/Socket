@@ -1,0 +1,46 @@
+# Delphi / RAD Studio
+
+# Binarios de compilacao
+*.dcu
+*.dcp
+*.bpl
+*.bpi
+*.dcpil
+*.drc
+*.exe
+*.dll
+*.map
+*.drf
+*.o
+*.a
+*.ocx
+*.rsm
+*.tds
+*.dsk
+
+# Saidas de build
+[Ww]in32/
+[Ww]in64/
+[Aa]ndroid/
+[Ii]OSDevice*/
+[Oo][Ss][Xx]*/
+[Ll]inux64/
+__recovery/
+__history/
+
+# Configuracao local da IDE (nao pertence ao repositorio)
+*.local
+*.identcache
+*.stat
+*.tvsconfig
+*.groupproj.local
+*.otares
+
+# Backups e temporarios
+*.~*
+*.bak
+backup/
+modules/
+
+# Delphi LSP / cache
+.cache/
