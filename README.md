@@ -20,7 +20,9 @@ Escrita conforme **ThR — Normas e Padronização de Codificação (Delphi) v4.
 | `THR.WebSocket.Pusher.pas` | Cliente do protocolo Pusher / Laravel Reverb (`TPusherClient.New`), sobre o cliente acima |
 
 Dependências: apenas RTL + Indy (já presente no RAD Studio). Adicione `src\Lib`
-ao *search path* do projeto.
+ao *search path* do projeto. Conexão via `UseSSL` (TLS/`wss://`) exige também
+as DLLs do OpenSSL (`libeay32`/`ssleay32` ou `libcrypto`/`libssl` 3.x) junto do
+executável — não vêm com o RAD Studio nem com esta biblioteca.
 
 ## Servidor
 
@@ -148,6 +150,32 @@ FClient.Disconnect;
 O cliente mascara os quadros (exigência da RFC para o lado cliente), valida o
 `Sec-WebSocket-Accept` do servidor e mantém uma thread de leitura própria.
 
+### Conexão segura (wss://)
+
+```delphi
+FClient := TWebSocketClient
+  .New
+  .Host('meuservidor.com')
+  .Port(443)
+  .Resource('/chat')
+  .UseSSL                     // TLS via IdSSLOpenSSL — exige libeay32/ssleay32
+  .SynchronizeEvents          //   (ou libcrypto/libssl 3.x) ao lado do executável
+  .OnMessage(
+    procedure(const AClient: IWebSocketClient; const AMessage: String)
+    begin
+      MemoLog.Lines.Add(AMessage);
+    end)
+  .Connect;
+```
+
+`UseSSL(AValue: Boolean = True)` injeta um `TIdSSLIOHandlerSocketOpenSSL` no
+`TIdTCPClient` antes de conectar (TLS 1.2, `sslmClient`). Por padrão a conexão
+é feita **sem validação do certificado do servidor** (`VerifyMode := []`),
+mesmo comportamento já usado em outros clientes TLS do projeto — adequado para
+ambientes internos, não recomendado para tráfego sensível pela internet sem
+revisão. As DLLs OpenSSL não acompanham a biblioteca; distribua-as junto do
+executável quando `UseSSL` for usado.
+
 ## Cliente Pusher (Laravel Reverb / Laravel WebSockets)
 
 `THR.WebSocket.Pusher` é uma camada de **protocolo de aplicação** sobre o
@@ -253,9 +281,12 @@ FPusher.Ping;   // pusher:ping — evite cair pelo activity_timeout
 events habilitados no servidor. `Socket` devolve o `IWebSocketClient` interno,
 caso precise do transporte cru.
 
-> Limitações atuais: sem `wss://` (TLS) — o transporte é TCP puro, adequado a
-> `PUSHER_SCHEME=http`; e o `IPusherClient` é somente cliente, o
-> `THR.WebSocket.Server` não substitui o Reverb.
+> Limitações atuais: `IPusherClient` ainda não expõe `UseSSL` — o
+> `THR.WebSocket.Client` (transporte usado por baixo) já suporta `wss://` (veja
+> "Conexão segura" na seção Cliente), mas essa opção não foi repassada pela
+> fachada do Pusher, que por enquanto atende apenas `PUSHER_SCHEME=http`. E o
+> `IPusherClient` é somente cliente, o `THR.WebSocket.Server` não substitui o
+> Reverb.
 
 ## Protocolo do exemplo de chat
 
