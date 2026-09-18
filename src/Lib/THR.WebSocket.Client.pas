@@ -10,7 +10,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.JSON, System.SyncObjs, System.NetEncoding,
-  IdTCPClient, IdGlobal, IdIOHandler, IdException,
+  IdTCPClient, IdGlobal, IdIOHandler, IdException, IdSSLOpenSSL,
   THR.WebSocket.Types, THR.WebSocket.Frame, THR.WebSocket.Handshake;
 
 type
@@ -54,6 +54,10 @@ type
     function ReadTimeout(const AValue: Integer): IWebSocketClient;
     function SynchronizeEvents(const AValue: Boolean = True): IWebSocketClient;
     function ReplyPingWithPong(const AValue: Boolean = True): IWebSocketClient;
+
+    { Ativa TLS (wss://) na conexao, usando IdSSLOpenSSL. Precisa das DLLs
+      OpenSSL disponiveis para o processo. }
+    function UseSSL(const AValue: Boolean = True): IWebSocketClient;
 
     { Eventos }
     function OnConnected(const AEvent: TWebSocketClientEvent): IWebSocketClient;
@@ -105,6 +109,8 @@ type
     FReadTimeout: Integer;
     FSynchronizeEvents: Boolean;
     FReplyPingWithPong: Boolean;
+    FUseSSL: Boolean;
+    FSSLHandler: TIdSSLIOHandlerSocketOpenSSL;
 
     FOnConnected: TWebSocketClientEvent;
     FOnDisconnected: TWebSocketClientEvent;
@@ -134,6 +140,10 @@ type
     function ReadTimeout(const AValue: Integer): IWebSocketClient;
     function SynchronizeEvents(const AValue: Boolean = True): IWebSocketClient;
     function ReplyPingWithPong(const AValue: Boolean = True): IWebSocketClient;
+
+    { Ativa TLS (wss://) na conexao, usando IdSSLOpenSSL. Precisa das DLLs
+      OpenSSL disponiveis para o processo. }
+    function UseSSL(const AValue: Boolean = True): IWebSocketClient;
 
     { Eventos }
     function OnConnected(const AEvent: TWebSocketClientEvent): IWebSocketClient;
@@ -204,6 +214,7 @@ begin
   FReadTimeout := C_DEFAULT_READ_TIMEOUT;
   FSynchronizeEvents := False;
   FReplyPingWithPong := True;
+  FUseSSL := False;
 
   FParameters := TStringList.Create;
   FLock := TCriticalSection.Create;
@@ -219,6 +230,7 @@ begin
     FClient.Disconnect;
 
   FClient.Free;
+  FSSLHandler.Free;
   FParameters.Free;
   FLock.Free;
   inherited;
@@ -459,6 +471,12 @@ begin
   FReplyPingWithPong := AValue;
 end;
 
+function TWebSocketClient.UseSSL(const AValue: Boolean): IWebSocketClient;
+begin
+  Result := Self;
+  FUseSSL := AValue;
+end;
+
 { Eventos }
 
 function TWebSocketClient.OnConnected(const AEvent: TWebSocketClientEvent): IWebSocketClient;
@@ -500,6 +518,8 @@ end;
 { Controle }
 
 function TWebSocketClient.Connect: IWebSocketClient;
+var
+  LEsquema: String;
 begin
   Result := Self;
 
@@ -511,15 +531,38 @@ begin
   FClient.Host := FHost;
   FClient.Port := FPort;
 
+  if FUseSSL then
+  begin
+    if FSSLHandler = nil then
+      FSSLHandler := TIdSSLIOHandlerSocketOpenSSL.Create(nil);
+
+    FSSLHandler.SSLOptions.Method := sslvTLSv1_2;
+    FSSLHandler.SSLOptions.Mode := sslmClient;
+    FSSLHandler.SSLOptions.VerifyMode := [];
+    FSSLHandler.SSLOptions.VerifyDepth := 0;
+    FClient.IOHandler := FSSLHandler;
+  end
+  else
+    FClient.IOHandler := nil;
+
   FLock.Enter;
   try
     FClient.Connect;
+
+    if FUseSSL then
+      TIdSSLIOHandlerSocketOpenSSL(FClient.IOHandler).PassThrough := False;
+
     TWebSocketHandshake.PerformClientHandshake(FClient.IOHandler, FHost, BuildResource);
   finally
     FLock.Leave;
   end;
 
-  Log(Format('Conectado a ws://%s:%d%s', [FHost, FPort, BuildResource]));
+  if FUseSSL then
+    LEsquema := 'wss'
+  else
+    LEsquema := 'ws';
+
+  Log(Format('Conectado a %s://%s:%d%s', [LEsquema, FHost, FPort, BuildResource]));
 
   FReader := TReaderThread.Create(Self);
   FReader.Start;
